@@ -1,6 +1,6 @@
 # Саймон — Arduino Uno
 
-Временное решение: общая шина UART/I²C. Uno «Провода» служит шлюзом от ESP32 к Саймону и лабиринту. Общая схема и протокол описаны в [shared/README.md](../shared/README.md).
+Временное решение: общая шина UART/I²C. Uno «Провода» служит шлюзом от ESP32 к Саймону и лабиринту. Общая схема и протокол описаны в [docs/bus.md](docs/bus.md).
 
 ## Подключение
 
@@ -46,13 +46,13 @@
 
 ## Сборка и проверка
 
-Из корня сборки, при расположении `shared` рядом с проектом:
+Из папки этого проекта:
 
 ```powershell
-pio run -d simon
-pio run -d simon -t upload
-pio device monitor -d simon
-python shared/test/check_bus.py
+pio run
+pio run -t upload
+pio device monitor
+python test/check_bus.py
 ```
 
 Монитор — 115200 бод. COM-порт для этой Uno пока не закреплён: перед загрузкой при нескольких платах укажите правильный `upload_port` в `platformio.ini` или через `--upload-port`. Не используйте автоматически порт другой головоломки.

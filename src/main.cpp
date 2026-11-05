@@ -15,7 +15,7 @@
 #include <TM1637Display.h>
 #include <Adafruit_NeoPixel.h>
 #include <Wire.h>
-#include "../../shared/puzzle_i2c.h"
+#include "puzzle_i2c.h"
 
 const uint8_t PIN_TM_CLK = 2;
 const uint8_t PIN_TM_DIO = 4;
