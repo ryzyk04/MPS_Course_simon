@@ -1,4 +1,4 @@
-// Саймон: модуль-головоломка. Сид и уровень генерируются при включении.
+// Саймон: временный I2C-модуль 0x11; сид/сложность приходят через wires-шлюз.
 //
 // Распиновка (Arduino Uno):
 //   TM1637  CLK -> D2, DIO -> D4, VCC -> 5V, GND -> GND       (сид)
@@ -7,19 +7,25 @@
 //   Лента WS2812 на 2 светодиода: DIN -> D7, светодиод [0] = уровень сложности
 //   Лента WS2812 на 4 светодиода: DIN -> D8, светодиоды [0..2] = этапы
 //   (на DIN каждой ленты резистор ~330 Ом, питание 5V и GND)
-//   Кнопки 1..5 -> A1, A2, A3, A4, A5, вторым выводом на GND (внутренняя подтяжка)
+//   Кнопки 1..5 -> A1, A2, A3, D9, D10, вторым выводом на GND
+//   I2C: A4 SDA, A5 SCL, общий GND с другими Uno, подтяжки к 5V на шлюзе
 //   A0 оставить свободным (источник случайности)
 
 #include <Arduino.h>
 #include <TM1637Display.h>
 #include <Adafruit_NeoPixel.h>
+#include <Wire.h>
+#include "../../shared/puzzle_i2c.h"
 
 const uint8_t PIN_TM_CLK = 2;
 const uint8_t PIN_TM_DIO = 4;
 const uint8_t PIN_RGB[3] = {3, 5, 6};  // R, G, B (PWM)
 const uint8_t PIN_LEVEL_STRIP = 7;
 const uint8_t PIN_STAGE_STRIP = 8;
-const uint8_t PIN_BTN[5] = {A1, A2, A3, A4, A5};
+const uint8_t PIN_BTN[5] = {A1, A2, A3, 9, 10};
+PuzzleI2c bus;
+bool gameActive = false, stagePending = false;
+uint32_t stageReadyAt = 0;
 
 // true: общий вывод V подключён к +5V, false: к GND
 const bool COMMON_ANODE = true;
@@ -92,6 +98,7 @@ uint32_t showT;
 
 // Антидребезг
 bool btnState[5];
+bool btnRaw[5];
 uint32_t btnT[5];
 
 const uint8_t BLACK[3] = {0, 0, 0};
@@ -270,7 +277,9 @@ void updateShow() {
 }
 
 void onPress(uint8_t button) {  // button 1..5
+  if (!gameActive || stagePending || stage >= 3) return;
   if (button != expected[inputPos]) {
+    bus.smallError();
     inputPos = 0;  // малая ошибка: этап заново
     errorActive = true;
     errorT = millis();
@@ -286,45 +295,40 @@ void onPress(uint8_t button) {  // button 1..5
   drawProgress();
   setSimon(BLACK);
   if (stage >= 3) {
+    gameActive = false;
+    bus.solved();
     Serial.println(F("SOLVED"));
     return;
   }
-  delay(STAGE_DONE_MS);
-  startStage();
+  stagePending = true;
+  stageReadyAt = millis() + STAGE_DONE_MS;
 }
 
 void readButtons() {
   for (uint8_t i = 0; i < 5; i++) {
     bool pressed = digitalRead(PIN_BTN[i]) == LOW;
-    if (pressed != btnState[i] && millis() - btnT[i] >= DEBOUNCE_MS) {
-      btnState[i] = pressed;
+    if (pressed != btnRaw[i]) {
+      btnRaw[i] = pressed;
       btnT[i] = millis();
-      if (pressed) onPress(i + 1);
     }
+    if (btnRaw[i] == btnState[i] || millis() - btnT[i] < DEBOUNCE_MS) continue;
+    btnState[i] = btnRaw[i];
+    if (btnState[i]) onPress(i + 1);
   }
 }
 
-void setup() {
-  Serial.begin(115200);
-  for (uint8_t i = 0; i < 5; i++) pinMode(PIN_BTN[i], INPUT_PULLUP);
-
-  uint32_t r = micros();
-  for (uint8_t i = 0; i < 16; i++) r = r * 31 + analogRead(A0) + micros();
-  randomSeed(r);
-
-  level = (Level)random(3);
-  for (uint8_t i = 0; i < 4; i++) digits[i] = random(10);
-
-  display.setBrightness(5);
+void beginGame() {
+  uint16_t seed = bus.status.seed;
+  level = static_cast<Level>(bus.status.difficulty);
+  randomSeed(uint32_t(seed) + 1);
+  for (int8_t i = 3; i >= 0; --i) { digits[i] = seed % 10; seed /= 10; }
+  for (uint8_t i = 0; i < 5; ++i) {
+    btnRaw[i] = btnState[i] = digitalRead(PIN_BTN[i]) == LOW;
+    btnT[i] = millis();
+  }
   display.showNumberDec(digits[0] * 1000 + digits[1] * 100 + digits[2] * 10 + digits[3], true);
-
-  for (uint8_t i = 0; i < 3; i++) pinMode(PIN_RGB[i], OUTPUT);
   setSimon(BLACK);
-
-  stageStrip.begin();
-  stageStrip.setBrightness(60);
-  levelStrip.begin();
-  levelStrip.setBrightness(60);
+  stageStrip.clear(); levelStrip.clear();
   const uint32_t levelColor[3] = {levelStrip.Color(0, 255, 0), levelStrip.Color(255, 180, 0),
                                   levelStrip.Color(255, 0, 0)};
   levelStrip.setPixelColor(0, levelColor[level]);
@@ -337,11 +341,41 @@ void setup() {
   Serial.println(level == EASY ? F("easy") : level == MEDIUM ? F("medium") : F("hard"));
 
   stage = 0;
+  errorActive = false; stagePending = false; gameActive = true;
   startStage();
 }
 
+void haltGame() {
+  gameActive = stagePending = false;
+  setSimon(BLACK);
+  display.clear();
+  stageStrip.clear(); stageStrip.show();
+  levelStrip.clear(); levelStrip.show();
+}
+
+void setup() {
+  Serial.begin(115200);
+  for (uint8_t i = 0; i < 5; ++i) pinMode(PIN_BTN[i], INPUT_PULLUP);
+  for (uint8_t i = 0; i < 3; ++i) pinMode(PIN_RGB[i], OUTPUT);
+  display.setBrightness(5);
+  stageStrip.begin(); stageStrip.setBrightness(60);
+  levelStrip.begin(); levelStrip.setBrightness(60);
+  haltGame();
+  bus.begin(ModuleBus::SIMON, ModuleBus::SIMON_ADDRESS);
+  Serial.println(F("WAITING_FOR_COMMAND: I2C 0x11, SDA=A4 SCL=A5"));
+}
+
 void loop() {
+  PuzzleI2c::Action action = bus.update();
+  if (action == PuzzleI2c::NEW_GAME) beginGame();
+  else if (action == PuzzleI2c::HALT) haltGame();
+  if (!gameActive) return;
   readButtons();
+  if (!gameActive) return;
+  if (stagePending) {
+    if (int32_t(millis() - stageReadyAt) >= 0) { stagePending = false; startStage(); }
+    return;
+  }
   if (stage < 3) {
     updateShow();
     updateStageLed();
