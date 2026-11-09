@@ -18,10 +18,8 @@ enum class Strip : uint8_t { Level, Progress };
 bool showPixels(Strip strip, const uint8_t *data, uint8_t size);
 bool showDigits(const uint8_t segments[4]);
 
-// Интерфейс к TWI. Размеры фиксированы старым протоколом шлюза.
-void beginTwi(uint8_t address);
-void publishStatus(const uint8_t *packet);
-bool takeCommand(uint8_t *packet);
+// Настройка выводов SDA/SCL. Сам TWI обслуживает общая библиотека.
+void prepareTwi();
 
 } // namespace Hardware
 } // namespace Simon

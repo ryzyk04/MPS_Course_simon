@@ -3,77 +3,42 @@
 
 namespace Simon {
 
-void Node::begin()
+bool Node::begin()
 {
-    status_ = ModuleBus::Frame();
-    status_.type = ModuleBus::SIMON;
-    publish();
-    Hardware::beginTwi(ModuleBus::SIMON_ADDRESS);
-}
-
-void Node::publish()
-{
-    uint8_t packet[ModuleBus::FRAME_SIZE];
-    ModuleBus::encode(status_, packet);
-    Hardware::publishStatus(packet);
+    Hardware::prepareTwi();
+    return bus_.begin(0x11);
 }
 
 Action Node::update()
 {
-    uint8_t packet[ModuleBus::FRAME_SIZE];
-    if (!Hardware::takeCommand(packet)) {
+    bus_.update();
+    PuzzleBus::Command command;
+    if (!node_.takeCommand(command)) {
         return Action::None;
     }
 
-    ModuleBus::Frame command;
-    if (!ModuleBus::decode(packet, sizeof(packet), command) ||
-        command.type != ModuleBus::SIMON) {
-        return Action::None;
-    }
+    return command.operation == PuzzleBus::Operation::Generate
+        ? Action::NewGame : Action::Halt;
+}
 
-    if (command.operation == ModuleBus::GENERATE) {
-        if (command.round == status_.round) {
-            return Action::None;
-        }
-
-        status_.round = command.round;
-        status_.seed = command.seed;
-        status_.difficulty = command.difficulty;
-        status_.errors = 0;
-        status_.state = ModuleBus::PLAYING;
-        publish();
-        return Action::NewGame;
-    }
-
-    if (command.operation == ModuleBus::RESET ||
-        (command.operation == ModuleBus::STOP && command.round == status_.round)) {
-        status_.state = command.operation == ModuleBus::RESET
-            ? ModuleBus::WAITING : ModuleBus::STOPPED;
-        if (command.operation == ModuleBus::RESET) {
-            status_.round = 0;
-            status_.errors = 0;
-        }
-        publish();
-        return Action::Halt;
-    }
-
-    return Action::None;
+void Node::ready()
+{
+    node_.ready();
 }
 
 void Node::smallError()
 {
-    if (status_.state == ModuleBus::PLAYING && status_.errors != UINT16_MAX) {
-        ++status_.errors;
-        publish();
-    }
+    node_.smallError();
 }
 
 void Node::solved()
 {
-    if (status_.state == ModuleBus::PLAYING) {
-        status_.state = ModuleBus::SOLVED;
-        publish();
-    }
+    node_.finish(true);
+}
+
+void Node::sync()
+{
+    bus_.update();
 }
 
 } // namespace Simon

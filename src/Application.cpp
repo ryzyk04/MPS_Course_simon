@@ -15,7 +15,8 @@ void Application::update()
     const Action action = node_.update();
 
     if (action == Action::NewGame) {
-        game_.start(node_.status().seed, Level(node_.status().difficulty), now);
+        game_.start(node_.status().round.seed, Level(node_.status().round.difficulty), now);
+        node_.ready();
         buttons_.reset(Hardware::readButtons(), now);
         loggedStage_ = 0xFF;
     } else if (action == Action::Halt) {
@@ -42,6 +43,7 @@ void Application::update()
         Hardware::debugStage(loggedStage_, game_.sequence().buttons, game_.sequence().length);
     }
     display_.update(game_, now);
+    node_.sync();
 }
 
 } // namespace Simon

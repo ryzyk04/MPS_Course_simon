@@ -1,22 +1,29 @@
 #pragma once
 
-#include "module_bus.h"
+#include <PuzzleBus/AvrTwi.h>
 
 namespace Simon {
 
 enum class Action : uint8_t { None, NewGame, Halt };
 
+// Тонкая связь игровой модели с общей библиотекой.
+// Только библиотека владеет TWI_vect и кодирует пакеты.
 class Node {
 public:
-    void begin();
+    Node() : node_(PuzzleBus::PuzzleType::Simon), bus_(node_) {}
+
+    bool begin();
     Action update();
+    void ready();
     void smallError();
     void solved();
-    const ModuleBus::Frame &status() const { return status_; }
+    void sync();
+
+    const PuzzleBus::Status &status() const { return node_.status(); }
 
 private:
-    void publish();
-    ModuleBus::Frame status_;
+    PuzzleBus::PuzzleNode node_;
+    PuzzleBus::AvrTwiNode bus_;
 };
 
 } // namespace Simon
