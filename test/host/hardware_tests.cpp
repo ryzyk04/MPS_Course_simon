@@ -1,6 +1,7 @@
 #include "Test.h"
+#include "HostBus.h"
 #include "drivers/Board.h"
-#include "module_bus.h"
+#include "TestBus.h"
 #include "Config.h"
 
 #include <avr/io.h>
@@ -24,36 +25,6 @@ void delay()
 using namespace Simon::Hardware;
 
 namespace {
-
-void interrupt(uint8_t status, uint8_t data = 0)
-{
-    TWSR = status;
-    TWDR = data;
-    TWI_vect();
-}
-
-void send(const uint8_t *data, size_t size, uint8_t addressStatus = 0x60)
-{
-    interrupt(addressStatus);
-    for (size_t i = 0; i < size; ++i) {
-        interrupt(i < 20 ? 0x80 : 0x88, data[i]);
-    }
-    interrupt(0xA0);
-}
-
-std::vector<uint8_t> read(size_t length)
-{
-    interrupt(0xA8);
-    std::vector<uint8_t> out;
-    for (size_t i = 0; i < length; ++i) {
-        out.push_back(TWDR);
-        if (i + 1 < length) {
-            interrupt(0xB8);
-        }
-    }
-    interrupt(0xC0);
-    return out;
-}
 
 void board()
 {
@@ -112,100 +83,6 @@ void clockChecks()
     for (uint8_t saved : {uint8_t(0), uint8_t(0x80)}) {
         SREG = saved;
         (void)millis(); (void)micros();
-        CHECK(SREG == saved);
-    }
-    SREG = 0x80;
-}
-
-void slaveReceive()
-{
-    beginTwi(0x11);
-    CHECK(TWAR == 0x22 && TWAMR == 0);
-    CHECK((TWCR & (_BV(TWIE) | _BV(TWEN) | _BV(TWEA))) ==
-          (_BV(TWIE) | _BV(TWEN) | _BV(TWEA)));
-    uint8_t bytes[80];
-    for (size_t i = 0; i < sizeof(bytes); ++i) { bytes[i] = i; }
-    uint8_t packet[20] = {};
-
-    for (size_t length = 0; length <= sizeof(bytes); ++length) {
-        send(bytes, length);
-        CHECK(takeCommand(packet) == (length == 20));
-        if (length == 20) { CHECK(!memcmp(bytes, packet, 20)); }
-        CHECK(!takeCommand(packet));
-    }
-
-    send(bytes, 20, 0x68);
-    CHECK(!takeCommand(nullptr)); // Не съедает готовый пакет.
-    CHECK(takeCommand(packet));
-    CHECK(!memcmp(bytes, packet, 20));
-    // Пакет публикуется только после STOP, CRC проверяет основной цикл.
-    interrupt(0x60);
-    for (uint8_t i = 0; i < 20; ++i) { interrupt(0x80, bytes[i]); }
-    CHECK(!takeCommand(packet));
-    CHECK(!(TWCR & _BV(TWEA))); // 21-й байт будет принят с NACK.
-    interrupt(0xA0);
-    CHECK(takeCommand(packet));
-
-    // Непрочитанный пакет не затирается следующим. Шлюз повторит команду.
-    send(bytes, 20);
-    bytes[0] = 200;
-    send(bytes, 20);
-    CHECK(takeCommand(packet) && packet[0] == 0);
-    CHECK(!takeCommand(packet));
-
-    interrupt(0x60);
-    interrupt(0x80, 42);
-    interrupt(0x00); // Ошибка отменяет незавершённую запись.
-    CHECK(TWCR & _BV(TWSTO));
-    interrupt(0xA0);
-    CHECK(!takeCommand(packet));
-    send(bytes, 20);
-    CHECK(takeCommand(packet) && packet[0] == 200);
-
-    interrupt(0x60);
-    interrupt(0x80, 42);
-    interrupt(0xF8);
-    interrupt(0xA0);
-    CHECK(!takeCommand(packet));
-}
-
-void slaveTransmit()
-{
-    uint8_t first[20], second[20];
-    for (uint8_t i = 0; i < 20; ++i) {
-        first[i] = i + 10;
-        second[i] = i + 100;
-    }
-    publishStatus(first);
-    interrupt(0xA8);
-    CHECK(TWDR == first[0]);
-    publishStatus(second);
-    for (uint8_t i = 1; i < 20; ++i) {
-        interrupt(0xB8);
-        CHECK(TWDR == first[i]); // Обновление не рвёт кадр посередине.
-    }
-    for (uint8_t i = 0; i < 20; ++i) {
-        interrupt(0xB8);
-        CHECK(TWDR == 0);
-    }
-    interrupt(0xC8);
-    CHECK(read(20) == std::vector<uint8_t>(second, second + 20));
-    CHECK(read(1)[0] == second[0]);
-    CHECK(read(20) == std::vector<uint8_t>(second, second + 20));
-    interrupt(0xB0);
-    CHECK(TWDR == second[0]);
-    interrupt(0xC0);
-
-    // repeated START: готовая команда и параллельный ответ независимы.
-    send(first, 20);
-    CHECK(read(20) == std::vector<uint8_t>(second, second + 20));
-    uint8_t packet[20];
-    CHECK(takeCommand(packet) && !memcmp(packet, first, 20));
-    for (uint8_t saved : {uint8_t(0), uint8_t(0x80)}) {
-        SREG = saved;
-        publishStatus(first);
-        (void)takeCommand(packet);
-        beginTwi(0x11);
         CHECK(SREG == saved);
     }
     SREG = 0x80;
@@ -272,6 +149,102 @@ void tm1637()
     CHECK(SREG == 0x80);
 }
 
+void sharedReceive()
+{
+    using namespace PuzzleBus;
+    Simon::Hardware::prepareTwi();
+    CHECK((DDRC & 0x30) == 0 && (PORTC & 0x30) == 0x30);
+    Frame command;
+    command.operation = Operation::Generate;
+    command.status.type = PuzzleType::Simon;
+    command.status.round.id = UINT64_MAX;
+    command.status.round.seed = 9999;
+    command.status.round.difficulty = 2;
+    uint8_t bytes[80] = {};
+    CHECK(encode(command, bytes, FRAME_SIZE));
+
+    for (size_t size = 0; size <= sizeof(bytes); ++size) {
+        PuzzleNode node(PuzzleType::Simon);
+        AvrTwiNode bus(node);
+        CHECK(bus.begin(0x11));
+        CHECK(TWAR == 0x11 * 2 && TWAMR == 0);
+        HostBus::deliver(bytes, size);
+        CHECK(node.status().state == PuzzleBus::State::Waiting);
+        bus.update();
+        CHECK((node.status().state == PuzzleBus::State::Preparing) == (size == FRAME_SIZE));
+        Command received;
+        CHECK(node.takeCommand(received) == (size == FRAME_SIZE));
+        if (size == FRAME_SIZE) {
+            CHECK(received.round.id == UINT64_MAX && received.round.seed == 9999);
+            CHECK(node.ready());
+            bus.update();
+        } else {
+            CHECK(bus.droppedPackets() == 1);
+        }
+    }
+
+    PuzzleNode node(PuzzleType::Simon);
+    AvrTwiNode bus(node);
+    CHECK(bus.begin(0x11));
+    HostBus::deliver(bytes, FRAME_SIZE);
+    HostBus::deliver(bytes, FRAME_SIZE);
+    CHECK(bus.droppedPackets() == 1);
+    bus.update();
+    Command received;
+    CHECK(node.takeCommand(received));
+    CHECK(!node.takeCommand(received));
+    CHECK(node.ready());
+    bus.update();
+    HostBus::interrupt(0x60);
+    HostBus::interrupt(0x80, 42);
+    HostBus::interrupt(0x00);
+    CHECK(bus.busErrors() == 1 && (TWCR & _BV(TWSTO)));
+    HostBus::interrupt(0xA0);
+    bus.update();
+    CHECK(node.status().state == PuzzleBus::State::Playing);
+}
+
+void sharedTransmit()
+{
+    using namespace PuzzleBus;
+    PuzzleNode node(PuzzleType::Simon);
+    AvrTwiNode bus(node);
+    CHECK(bus.begin(0x11));
+    Frame frame;
+    CHECK(decode(HostBus::reply().data(), FRAME_SIZE, frame) == DecodeResult::Ok);
+    CHECK(frame.status.state == PuzzleBus::State::Waiting);
+    Frame command;
+    command.operation = Operation::Generate;
+    command.status.type = PuzzleType::Simon;
+    command.status.round.id = 1;
+    CHECK(node.receive(command));
+    Command taken;
+    CHECK(node.takeCommand(taken) && node.ready());
+    bus.update();
+    HostBus::interrupt(0xA8);
+    std::vector<uint8_t> snapshot{TWDR};
+    CHECK(node.smallError());
+    bus.update();
+    for (size_t i = 1; i < FRAME_SIZE; ++i) {
+        HostBus::interrupt(0xB8);
+        snapshot.push_back(TWDR);
+    }
+    HostBus::interrupt(0xC0);
+    CHECK(decode(snapshot.data(), snapshot.size(), frame) == DecodeResult::Ok);
+    CHECK(frame.status.smallErrors == 0);
+    const auto fresh = HostBus::reply();
+    CHECK(decode(fresh.data(), fresh.size(), frame) == DecodeResult::Ok);
+    CHECK(frame.status.smallErrors == 1);
+    for (uint8_t saved : {uint8_t(0), uint8_t(0x80)}) {
+        SREG = saved;
+        bus.update();
+        (void)bus.droppedPackets();
+        (void)bus.busErrors();
+        CHECK(SREG == saved);
+    }
+    SREG = 0x80;
+}
+
 } // namespace
 
 int main()
@@ -279,8 +252,8 @@ int main()
     try {
         run("GPIO mapping and PWM all 256 duties", board);
         run("Timer1, microseconds, pending compare and interrupt state", clockChecks);
-        run("TWI reception lengths 0..80, mailbox and recovery", slaveReceive);
-        run("TWI immutable replies, partial reads, padding and repeated START", slaveTransmit);
+        run("TWI reception lengths 0..80, mailbox and recovery", sharedReceive);
+        run("TWI immutable replies, partial reads, padding and repeated START", sharedTransmit);
         run("TM1637 start/stop, LSB frames, leading zeros and missing ACK", tm1637);
         std::cout << cases << " groups, " << checks << " checks\n";
     } catch (const std::exception &error) {

@@ -14,13 +14,18 @@ def main():
     if not compiler:
         raise SystemExit("g++ is required")
 
+    library = root.parent / "puzzle_bus"
     common = ["-std=c++17", "-O2", "-Wall", "-Wextra", "-Werror",
               "-I", str(root / "include"), "-I", str(root / "test" / "host")]
+
+    common += ["-I", str(library / "include")]
+    common += ["-I", str(root / "test/host/stubs")]
 
     def build_and_run(name, sources, flags=()):
         exe = out / (name + (".exe" if sys.platform == "win32" else ""))
         subprocess.run([compiler, *common, *flags,
-                        *[str(root / source) for source in sources],
+                        *[str(root / source) for source in sources], str(library / "src/avr/AvrTwi.cpp"),
+                        *[str(library / "src/core" / name) for name in ("Protocol.cpp", "Node.cpp", "Master.cpp")],
                         "-o", str(exe)], check=True, timeout=120)
         subprocess.run([str(exe)], check=True, timeout=120)
 
@@ -31,7 +36,7 @@ def main():
     ])
     build_and_run("hardware", [
         "test/host/hardware_tests.cpp", "src/drivers/Board.cpp",
-        "src/drivers/Clock.cpp", "src/drivers/TwiSlave.cpp", "src/drivers/Tm1637.cpp",
+        "src/drivers/Clock.cpp", "src/drivers/TwiPins.cpp", "src/drivers/Tm1637.cpp",
     ], ["-DF_CPU=16000000UL", "-I", str(root / "test" / "host" / "stubs")])
 
 

@@ -8,26 +8,11 @@ namespace Hardware {
 
 void beginBoard() {}
 void beginClock() {}
-uint32_t millis() { return Mock::now; }
+uint32_t millis() { Mock::pump(); return Mock::now; }
 uint32_t micros() { return Mock::now * 1000; }
 uint8_t readButtons() { return Mock::buttons; }
 void debugStage(uint8_t, const uint8_t *, uint8_t) {}
-void beginTwi(uint8_t address) { Mock::address = address; }
-
-void publishStatus(const uint8_t *packet)
-{
-    std::copy(packet, packet + ModuleBus::FRAME_SIZE, Mock::reply.begin());
-}
-
-bool takeCommand(uint8_t *packet)
-{
-    if (Mock::commands.empty()) {
-        return false;
-    }
-    std::copy(Mock::commands.front().begin(), Mock::commands.front().end(), packet);
-    Mock::commands.pop_front();
-    return true;
-}
+void prepareTwi() { Mock::address = 0x11; }
 
 void setRgb(uint8_t r, uint8_t g, uint8_t b)
 {

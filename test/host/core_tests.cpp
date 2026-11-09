@@ -201,44 +201,44 @@ void buttons()
 
 void protocol()
 {
-    ModuleBus::Frame original;
-    original.type = ModuleBus::SIMON;
-    original.operation = ModuleBus::GENERATE;
+    TestBus::Frame original;
+    original.type = TestBus::SIMON;
+    original.operation = TestBus::GENERATE;
     original.round = UINT64_MAX;
     original.seed = 9999;
     original.difficulty = 2;
     original.errors = UINT16_MAX;
-    uint8_t packet[20];
-    ModuleBus::encode(original, packet);
-    ModuleBus::Frame decoded;
-    CHECK(!ModuleBus::decode(nullptr, sizeof(packet), decoded));
-    CHECK(ModuleBus::decode(packet, sizeof(packet), decoded));
+    uint8_t packet[TestBus::FRAME_SIZE];
+    TestBus::encode(original, packet);
+    TestBus::Frame decoded;
+    CHECK(!TestBus::decode(nullptr, sizeof(packet), decoded));
+    CHECK(TestBus::decode(packet, sizeof(packet), decoded));
     CHECK(decoded.round == UINT64_MAX && decoded.seed == 9999);
     CHECK(decoded.errors == UINT16_MAX && decoded.difficulty == 2);
 
-    for (unsigned i = 0; i < 160; ++i) {
+    for (unsigned i = 0; i < TestBus::FRAME_SIZE * 8; ++i) {
         packet[i / 8] ^= 1U << (i % 8);
         decoded.seed = 123;
-        CHECK(!ModuleBus::decode(packet, sizeof(packet), decoded));
+        CHECK(!TestBus::decode(packet, sizeof(packet), decoded));
         CHECK(decoded.seed == 123);
         packet[i / 8] ^= 1U << (i % 8);
     }
     for (size_t size = 0; size < 40; ++size) {
-        if (size != 20) {
-            CHECK(!ModuleBus::decode(packet, size, decoded));
+        if (size != TestBus::FRAME_SIZE) {
+            CHECK(!TestBus::decode(packet, size, decoded));
         }
     }
 
-    auto invalid = [&](ModuleBus::Frame frame) {
-        ModuleBus::encode(frame, packet);
-        CHECK(!ModuleBus::decode(packet, 20, decoded));
+    auto invalid = [&](TestBus::Frame frame) {
+        TestBus::encode(frame, packet);
+        CHECK(!TestBus::decode(packet, sizeof(packet), decoded));
     };
     auto frame = original; frame.seed = 10000; invalid(frame);
     frame = original; frame.round = 0; invalid(frame);
     frame = original; frame.type = 0; invalid(frame);
     frame = original; frame.operation = 4; invalid(frame);
     frame = original; frame.difficulty = 3; invalid(frame);
-    frame = original; frame.state = 4; invalid(frame);
+    frame = original; frame.state = 6; invalid(frame);
 }
 
 void node()
@@ -246,49 +246,61 @@ void node()
     Mock::reset();
     Node node;
     node.begin();
-    CHECK(Mock::address == 0x11 && Mock::status().state == ModuleBus::WAITING);
-    node.smallError(); node.solved();
-    CHECK(Mock::status().state == ModuleBus::WAITING);
+    auto advance = [&]() {
+        Mock::pump();
+        const Action action = node.update();
+        if (action == Action::NewGame) { node.ready(); }
+        node.sync();
+        return action;
+    };
+    CHECK(Mock::address == 0x11 && Mock::status().state == TestBus::WAITING);
+    node.smallError(); node.sync(); node.solved(); node.sync();
+    CHECK(Mock::status().state == TestBus::WAITING);
     Mock::deliver(UINT64_MAX, 0, 2);
-    CHECK(node.update() == Action::NewGame);
+    CHECK(advance() == Action::NewGame);
     CHECK(Mock::status().round == UINT64_MAX && Mock::status().seed == 0);
-    node.smallError(); node.smallError();
+    node.smallError(); node.sync(); node.smallError(); node.sync();
     Mock::deliver(UINT64_MAX, 9999, 0);
-    CHECK(node.update() == Action::None); // Дубликат не меняет даже параметры.
+    CHECK(advance() == Action::None); // Дубликат не меняет даже параметры.
     CHECK(Mock::status().seed == 0 && Mock::status().errors == 2);
 
-    Mock::deliver(1, 42, 0, ModuleBus::GENERATE, ModuleBus::LABYRINTH);
-    CHECK(node.update() == Action::None);
+    Mock::deliver(1, 42, 0, TestBus::GENERATE, TestBus::LABYRINTH);
+    CHECK(advance() == Action::None);
     Mock::deliver(1);
     Mock::commands.front()[19] ^= 1;
-    CHECK(node.update() == Action::None);
+    CHECK(advance() == Action::None);
     Mock::deliver(1, 10000);
-    CHECK(node.update() == Action::None);
+    CHECK(advance() == Action::None);
     Mock::deliver(1, 0, 3);
-    CHECK(node.update() == Action::None);
+    CHECK(advance() == Action::None);
     Mock::deliver(0);
-    CHECK(node.update() == Action::None);
-    Mock::deliver(5, 0, 0, ModuleBus::STOP);
-    CHECK(node.update() == Action::None);
-    Mock::deliver(UINT64_MAX, 0, 0, ModuleBus::STOP);
-    CHECK(node.update() == Action::Halt);
-    node.smallError(); node.solved();
-    CHECK(Mock::status().state == ModuleBus::STOPPED && Mock::status().errors == 2);
+    CHECK(advance() == Action::None);
+    Mock::deliver(5, 0, 0, TestBus::STOP);
+    CHECK(advance() == Action::None);
+    Mock::deliver(UINT64_MAX, 0, 0, TestBus::STOP);
+    CHECK(advance() == Action::Halt);
+    node.smallError(); node.sync(); node.solved(); node.sync();
+    CHECK(Mock::status().state == TestBus::STOPPED && Mock::status().errors == 2);
     Mock::deliver(UINT64_MAX);
-    CHECK(node.update() == Action::None); // STOP не оживляет повтор GENERATE.
+    CHECK(advance() == Action::None); // STOP не оживляет повтор GENERATE.
 
+    // A lower round is rejected until an explicit Reset.
     Mock::deliver(2, 9999, 1);
-    CHECK(node.update() == Action::NewGame);
-    for (uint32_t i = 0; i < 65537; ++i) { node.smallError(); }
+    CHECK(advance() == Action::None);
+    Mock::deliver(0, 0, 0, TestBus::RESET);
+    CHECK(advance() == Action::Halt);
+    Mock::deliver(2, 9999, 1);
+    CHECK(advance() == Action::NewGame);
+    for (uint32_t i = 0; i < 65537; ++i) { node.smallError(); node.sync(); }
     CHECK(Mock::status().errors == UINT16_MAX);
-    node.solved(); node.smallError(); node.solved();
-    CHECK(Mock::status().state == ModuleBus::SOLVED && Mock::status().errors == UINT16_MAX);
-    Mock::deliver(0, 0, 0, ModuleBus::RESET);
-    CHECK(node.update() == Action::Halt);
+    node.solved(); node.sync(); node.smallError(); node.sync(); node.solved(); node.sync();
+    CHECK(Mock::status().state == TestBus::SOLVED && Mock::status().errors == UINT16_MAX);
+    Mock::deliver(0, 0, 0, TestBus::RESET);
+    CHECK(advance() == Action::Halt);
     CHECK(Mock::status().round == 0 && Mock::status().errors == 0);
     Mock::deliver(2);
-    CHECK(node.update() == Action::NewGame);
-    CHECK(node.update() == Action::None);
+    CHECK(advance() == Action::NewGame);
+    CHECK(advance() == Action::None);
 }
 
 void display()
@@ -345,10 +357,10 @@ void integration()
     Application app;
     app.begin();
     app.update();
-    CHECK(Mock::status().state == ModuleBus::WAITING);
+    CHECK(Mock::status().state == TestBus::WAITING);
     Mock::deliver(100, 42, 2);
     app.update();
-    CHECK(Mock::status().state == ModuleBus::PLAYING);
+    CHECK(Mock::status().state == TestBus::PLAYING);
     Game reference;
     CHECK(reference.start(42, HARD, Mock::now));
 
@@ -386,19 +398,19 @@ void integration()
             reference.update(Mock::now);
         }
     }
-    CHECK(Mock::status().state == ModuleBus::SOLVED);
+    CHECK(Mock::status().state == TestBus::SOLVED);
     CHECK(Mock::status().errors == 1);
     CHECK(Mock::progress[0] == 60 && Mock::progress[3] == 60 && Mock::progress[6] == 60);
 
     Mock::deliver(101);
     app.update();
-    Mock::deliver(101, 0, 0, ModuleBus::STOP);
+    Mock::deliver(101, 0, 0, TestBus::STOP);
     app.update();
-    CHECK(Mock::status().state == ModuleBus::STOPPED);
+    CHECK(Mock::status().state == TestBus::STOPPED);
     CHECK(Mock::rgb == std::vector<uint8_t>({0, 0, 0}));
-    Mock::deliver(0, 0, 0, ModuleBus::RESET);
+    Mock::deliver(0, 0, 0, TestBus::RESET);
     app.update();
-    CHECK(Mock::status().state == ModuleBus::WAITING && Mock::status().round == 0);
+    CHECK(Mock::status().state == TestBus::WAITING && Mock::status().round == 0);
 }
 
 } // namespace
